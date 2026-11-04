@@ -4,8 +4,11 @@
 
 Yipin Guo, Arun M George, Siddharth Joshi
 
+Department of Computer Science and Engineering, University of Notre Dame
+
 <p>
   <a href="https://arxiv.org/abs/2610.38210"><img src="https://img.shields.io/badge/arXiv-2610.38210-b31b1b.svg" alt="arXiv"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/KV%20cache-lossless%20BF16-4b44ce.svg" alt="Lossless BF16 KV">
   <img src="https://img.shields.io/badge/CUDA-fused%20decode%20attention-76b900.svg?logo=nvidia" alt="CUDA kernel">
   <img src="https://img.shields.io/badge/serving-nano--vllm%20%7C%20vLLM%20(NGC%2026.03)-2ea44f.svg" alt="nano-vllm and vLLM">
@@ -211,6 +214,11 @@ o = attention(q, kp, vp, scale=128 ** -0.5)      # fused decode attention on the
       url={https://arxiv.org/abs/2610.38210},
 }
 ```
+
+## License
+
+This project is released under the MIT License. See [`LICENSE`](LICENSE). The bundled nano-vllm keeps its own MIT
+license (`nanovllm/LICENSE`).
 
 ## Acknowledgements
 
