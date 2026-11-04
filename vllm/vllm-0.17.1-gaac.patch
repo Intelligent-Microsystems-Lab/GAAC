@@ -1,0 +1,116 @@
+diff -ruN a/vllm/envs.py b/vllm/envs.py
+--- a/vllm/envs.py
++++ b/vllm/envs.py
+@@ -1820,4 +1820,8 @@
+     for var in ray_noset_env_vars:
+         factors[var] = normalize_value(os.getenv(var))
+ 
++    # GAAC compressed KV cache changes the KV layout: keep its compiled artifacts apart from the stock backend's
++    for var in ("GAAC_VLLM", "GAAC_OVF_SLOT"):
++        factors[var] = normalize_value(os.getenv(var))
++
+     return factors
+diff -ruN a/vllm/platforms/cuda.py b/vllm/platforms/cuda.py
+--- a/vllm/platforms/cuda.py
++++ b/vllm/platforms/cuda.py
+@@ -348,6 +348,15 @@
+         device_capability = cls.get_device_capability()
+         assert device_capability is not None
+ 
++        # GAAC lossless compressed KV cache: decoder self-attention with head size 128 / 256
++        c = attn_selector_config
++        if os.environ.get("GAAC_VLLM", "0") == "1" and not (
++            c.use_mla or c.use_sparse or c.has_sink or c.attn_type != "decoder"
++            or c.head_size not in (128, 256)
++        ):
++            logger.info("Using GAAC compressed-KV attention backend.")
++            return AttentionBackendEnum.CUSTOM.get_path()
++
+         attn_selector_config = attn_selector_config._replace(block_size=None)
+         # First try checking just the selected backend, if there is one.
+         if selected_backend is not None:
+diff -ruN a/vllm/v1/attention/backends/registry.py b/vllm/v1/attention/backends/registry.py
+--- a/vllm/v1/attention/backends/registry.py
++++ b/vllm/v1/attention/backends/registry.py
+@@ -2,6 +2,7 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ """Attention backend registry"""
+ 
++import os
+ from collections.abc import Callable
+ from enum import Enum, EnumMeta
+ from typing import TYPE_CHECKING, cast
+@@ -259,3 +260,8 @@
+         return lambda x: x
+ 
+     return decorator
++
++
++# GAAC lossless compressed KV cache: the GAAC backend serves as the CUSTOM attention backend (all processes import this module)
++if os.environ.get("GAAC_VLLM", "0") == "1":
++    register_backend(AttentionBackendEnum.CUSTOM, "gaac.vllm.backend.GAACBackend")
+diff -ruN a/vllm/v1/core/block_pool.py b/vllm/v1/core/block_pool.py
+--- a/vllm/v1/core/block_pool.py
++++ b/vllm/v1/core/block_pool.py
+@@ -1,5 +1,6 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++import os
+ from collections.abc import Iterable, Sequence
+ from typing import Any
+ 
+@@ -416,6 +417,11 @@
+         """
+         # Materialize the iterable to allow multiple passes.
+         blocks_list = list(ordered_blocks)
++        if not self.enable_caching and os.environ.get("GAAC_VLLM", "0") == "1":
++            # GAAC: freed blocks hold dead content -> release their raw side-pool tiles
++            from gaac.vllm.backend import queue_freed_blocks
++
++            queue_freed_blocks(blocks_list)
+         for block in blocks_list:
+             block.ref_cnt -= 1
+         self.free_block_queue.append_n(
+diff -ruN a/vllm/v1/kv_cache_interface.py b/vllm/v1/kv_cache_interface.py
+--- a/vllm/v1/kv_cache_interface.py
++++ b/vllm/v1/kv_cache_interface.py
+@@ -2,6 +2,7 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
+ import copy
++import os
+ from dataclasses import dataclass, fields, replace
+ from math import prod
+ 
+@@ -13,6 +14,9 @@
+ from vllm.utils.math_utils import cdiv
+ from vllm.utils.torch_utils import get_dtype_size
+ 
++# GAAC lossless compressed KV cache: attention blocks are sized in compressed bytes
++_GAAC = os.environ.get("GAAC_VLLM", "0") == "1"
++
+ logger = init_logger(__name__)
+ 
+ 
+@@ -78,6 +82,10 @@
+ 
+     @property
+     def real_page_size_bytes(self) -> int:
++        if _GAAC:
++            from gaac.vllm.backend import page_size_bytes
++
++            return page_size_bytes(self.num_kv_heads, self.head_size, self.block_size)
+         return (
+             2
+             * self.block_size
+@@ -179,6 +187,10 @@
+ 
+     @property
+     def real_page_size_bytes(self) -> int:
++        if _GAAC:
++            from gaac.vllm.backend import page_size_bytes
++
++            return page_size_bytes(self.num_kv_heads, self.head_size, self.block_size)
+         return (
+             self.block_size
+             * self.num_kv_heads

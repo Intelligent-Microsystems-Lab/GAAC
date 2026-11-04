@@ -1,0 +1,7 @@
+torch>=2.4.0
+triton>=3.0.0
+transformers>=4.51.0
+flash-attn
+xxhash
+pytest
+datasets>=3,<4   # examples/calibrate.py (WikiText-2); 4.x needs huggingface-hub>=1, which transformers 4.x rejects
