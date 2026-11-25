@@ -82,7 +82,7 @@ __global__ void __launch_bounds__(128,2) gaac_vpaged256(
     #pragma unroll
     for(int o=4;o<32;o<<=1){ int v0=__shfl_up_sync(0xffffffffu,i0,o), v1=__shfl_up_sync(0xffffffffu,i1,o); if(lane>=o){i0+=v0; i1+=v1;} }
     int tot0=__shfl_sync(0xffffffffu,i0,28+j); p0=i0-b0; p1=tot0+i1-b1; };
-  auto load_k_ext=[&](u32 fl,int pos0)->u32{ if(mode==1) return 0u; u32 t4=(fl>>(8*j))&0xFFu; if(!t4) return 0u;   // this lane's 4 groups
+  auto load_k_ext=[&](u32 fl,long pos0)->u32{ if(mode==1) return 0u; u32 t4=(fl>>(8*j))&0xFFu; if(!t4) return 0u;   // this lane's 4 groups
     const uint8_t* p=OVK+pos0+ovf_prefix(fl,8*j); u32 e=0u;
     #pragma unroll
     for(int g=0;g<4;g++){ u32 t=(t4>>(2*g))&3u; if(t==1u) e|=((u32)*p)<<(8*g); p+= (t==1u)?1:((t==3u)?5:0); }
@@ -100,7 +100,7 @@ __global__ void __launch_bounds__(128,2) gaac_vpaged256(
     #pragma unroll
     for(int o=1;o<4;o<<=1){ int vx=__shfl_up_sync(0xffffffffu,ix,o), vy=__shfl_up_sync(0xffffffffu,iy,o); if(j>=o){ix+=vx; iy+=vy;} }
     int tot=__shfl_sync(0xffffffffu,ix,(lane&~3)|3); p[0]=ix-x; p[1]=p[0]+b0; p[2]=tot+iy-y; p[3]=p[2]+b2; };
-  auto load_v_ext=[&](const u32* m,const int* pre,int base,u32& e0,u32& e1){ e0=e1=0u; if(mode==1) return;   // groups 2r,2r+1 of each token -> byte slot 2t+g
+  auto load_v_ext=[&](const u32* m,const int* pre,long base,u32& e0,u32& e1){ e0=e1=0u; if(mode==1) return;   // groups 2r,2r+1 of each token -> byte slot 2t+g
     #pragma unroll
     for(int t=0;t<4;t++){ u32 fl=m[t]; u32 t2=(fl>>(4*r))&0xFu; if(!t2) continue;
       const uint8_t* p=OVV+base+pre[t]+ovf_prefix(fl,4*r);
@@ -109,7 +109,7 @@ __global__ void __launch_bounds__(128,2) gaac_vpaged256(
         if(slot<4) e0|=by<<(8*slot); else e1|=by<<(8*(slot-4)); p+=(tt==1u)?1:((tt==3u)?5:0); } } };
 
   // ---- reconstruction (branch-free tier select; rare raw tier via noinline) ----
-  int kpos[2]={0,0}; int vpos[4]={0,0,0,0};   // absolute overflow positions of the CURRENT tile's rows (for the rare raw-tier path)
+  long kpos[2]={0,0}; long vpos[4]={0,0,0,0};   // absolute overflow positions of the CURRENT tile's rows (for the rare raw-tier path)
   auto k_frag=[&](const KOct& K,int o_idx,int s,u32& b0,u32& b1){ const u32 cw[4]={K.c0,K.c1,K.c2,0u};
     u32 code4=codes4(cw,12*s); int g=s>>1; u32 fl= mode==1? 0u : K.fl; u32 t=(fl>>(2*(4*j+g)))&3u;
     u32 eb=(K.ext>>(8*g))&0xFFu; u32 bits=(eb>>(4*(s&1)))&0xFu; u32 x4=((bits&1u)|((bits&2u)<<7)|((bits&4u)<<14)|((bits&8u)<<21))<<3;
@@ -126,26 +126,26 @@ __global__ void __launch_bounds__(128,2) gaac_vpaged256(
     u32 sm4=reinterpret_cast<const u32*>(&V.sm[t])[w]; bf16x4(sm4,e4,u01,u23); };
 
   // ---- pipeline state: tile t (consume), t+4 (payload+ext), t+8 (flags)
-  KOct kA[2],kB[2]; VTile vA,vB; u32 kmN[2],vmN[4]; int kposN[2],vposN[4];
-  auto positions=[&](int pk_,int pv_,const u32* kf,const u32* vf,int* kp,int* vp){ int p0,p1; k_prefix(kf[0],kf[1],p0,p1); int kb=pk_*TS; kp[0]=kb+p0; kp[1]=kb+p1;
-    int pv[4]; v_prefix(vf,pv); int vb=pv_*TS;
+  KOct kA[2],kB[2]; VTile vA,vB; u32 kmN[2],vmN[4]; long kposN[2],vposN[4];
+  auto positions=[&](int pk_,int pv_,const u32* kf,const u32* vf,long* kp,long* vp){ int p0,p1; k_prefix(kf[0],kf[1],p0,p1); long kb=(long)pk_*TS; kp[0]=kb+p0; kp[1]=kb+p1;
+    int pv[4]; v_prefix(vf,pv); long vb=(long)pv_*TS;
     #pragma unroll
     for(int t=0;t<4;t++) vp[t]=vb+pv[t]; };
   // logical tile -> physical tiles; negative entry = raw bf16 tile (~p)
   auto mt_at=[&](int tl,int& ek,int& ev){ int pc=BT[(long)b*bt_stride+tl]*(4*n_kv)+2*(kvh*2+hf); ek=MT[pc]; ev=MT[pc+1]; };   // block = 2*n_kv half-heads x {K,V}
   auto resolve=[&](int tl,int& pk_,int& pv_,bool& rawk,bool& rawv){ int ek,ev; mt_at(tl,ek,ev); rawk=ek<0; rawv=ev<0; pk_= rawk? ~ek: ek; pv_= rawv? ~ev: ev; };
   int pkA,pvA,pkB,pvB; bool rkA,rvA,rkB,rvB; int ekN=0,evN=0;   // ekN/evN: raw table entries of the NEXT-next tile (prefetched)
-  auto load_k_all=[&](int tl,KOct* K2,int& pk_,int& pv_,bool& rk_,bool& rv_,int* kp,bool pre,int ek,int ev){
+  auto load_k_all=[&](int tl,KOct* K2,int& pk_,int& pv_,bool& rk_,bool& rv_,long* kp,bool pre,int ek,int ev){
     if(pre){ rk_=ek<0; rv_=ev<0; pk_= rk_? ~ek: ek; pv_= rv_? ~ev: ev; } else resolve(tl,pk_,pv_,rk_,rv_);
     if(!rk_){ load_k_pay(pk_,0,K2[0]); load_k_pay(pk_,1,K2[1]); K2[0].fl=load_k_meta(pk_,0); K2[1].fl=load_k_meta(pk_,1); } else { K2[0].fl=K2[1].fl=0u; }
-    { int p0,p1; k_prefix(K2[0].fl,K2[1].fl,p0,p1); int kb=pk_*TS; kp[0]=kb+p0; kp[1]=kb+p1; }
+    { int p0,p1; k_prefix(K2[0].fl,K2[1].fl,p0,p1); long kb=(long)pk_*TS; kp[0]=kb+p0; kp[1]=kb+p1; }
     if(!rk_){ K2[0].ext=load_k_ext(K2[0].fl,kp[0]); K2[1].ext=load_k_ext(K2[1].fl,kp[1]); } else { K2[0].ext=K2[1].ext=0u; } };
-  auto load_v_all=[&](int pv_,bool rv_,VTile& V,int* vp){
+  auto load_v_all=[&](int pv_,bool rv_,VTile& V,long* vp){
     if(!rv_){ load_v_pay(pv_,V); load_v_meta(pv_,V.fl); } else { V.fl[0]=V.fl[1]=V.fl[2]=V.fl[3]=0u; }
-    { int pv[4]; v_prefix(V.fl,pv); int vb=pv_*TS;
+    { int pv[4]; v_prefix(V.fl,pv); long vb=(long)pv_*TS;
       #pragma unroll
       for(int t=0;t<4;t++) vp[t]=vb+pv[t]; }
-    if(!rv_){ int vb=pv_*TS; int pr[4]; for(int t=0;t<4;t++) pr[t]=vp[t]-vb; load_v_ext(V.fl,pr,vb,V.ext0,V.ext1); } else { V.ext0=V.ext1=0u; } };
+    if(!rv_){ long vb=(long)pv_*TS; int pr[4]; for(int t=0;t<4;t++) pr[t]=(int)(vp[t]-vb); load_v_ext(V.fl,pr,vb,V.ext0,V.ext1); } else { V.ext0=V.ext1=0u; } };
   // raw tile fragments straight from bf16: K a-frag for token (o*8+r), dims 16s+2j+{0,1} / +8,+9 ; V words for slot t, word w (dims 8(4w+i)+r)
   auto raw_k_frag=[&](int p,int o,int s,u32& b0,u32& b1){ const __nv_bfloat16* kr=RAWK+((long)p*16+o*8+r)*D+16*s+2*j; b0=*reinterpret_cast<const u32*>(kr); b1=*reinterpret_cast<const u32*>(kr+8); };
   auto raw_v_words=[&](int p,int t,int w,u32& u01,u32& u23){ const int toks[4]={2*j,2*j+1,2*j+8,2*j+9}; const __nv_bfloat16* vr=RAWV+((long)p*16+toks[t])*D+8*(4*w)+r;
@@ -291,7 +291,7 @@ _mod = None
 def _ext():
     global _mod
     if _mod is None:
-        _mod = load_inline(name="gaac_vpaged256_v1", cpp_sources=_CPP, cuda_sources=_CUDA, functions=["gaac_vpaged256_launch"],
+        _mod = load_inline(name="gaac_vpaged256_v2", cpp_sources=_CPP, cuda_sources=_CUDA, functions=["gaac_vpaged256_launch"],
                            extra_cuda_cflags=["-O3", "--use_fast_math"])
     return _mod
 
